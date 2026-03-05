@@ -307,6 +307,7 @@ name = "dataxlr8-enrichment-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "dataxlr8-mcp-core",
  "hickory-resolver",

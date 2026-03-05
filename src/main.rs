@@ -3,8 +3,12 @@ use rmcp::transport::io::stdio;
 use rmcp::ServiceExt;
 use tracing::info;
 
+mod cache;
 mod db;
+mod merge;
+mod providers;
 mod tools;
+mod waterfall;
 
 use tools::EnrichmentMcpServer;
 
