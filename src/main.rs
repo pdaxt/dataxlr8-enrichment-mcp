@@ -10,6 +10,9 @@ mod providers;
 mod tools;
 mod waterfall;
 
+#[cfg(test)]
+mod tests;
+
 use tools::EnrichmentMcpServer;
 
 #[tokio::main]
