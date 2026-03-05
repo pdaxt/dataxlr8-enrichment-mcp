@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
+use dataxlr8_mcp_core::mcp::{empty_schema, error_result, get_i64, get_str, get_str_array, json_result, make_schema};
 use dataxlr8_mcp_core::Database;
 use rmcp::model::*;
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::ServerHandler;
-use serde::Serialize;
 
 use crate::providers::dns::DnsProvider;
 use crate::providers::http::HttpProvider;
@@ -12,43 +12,6 @@ use crate::providers::social::SocialProvider;
 use crate::providers::smtp::SmtpProvider;
 use crate::providers::EnrichmentProvider;
 use crate::waterfall::Waterfall;
-
-// ============================================================================
-// Tool schema helpers
-// ============================================================================
-
-fn make_schema(
-    properties: serde_json::Value,
-    required: Vec<&str>,
-) -> Arc<serde_json::Map<String, serde_json::Value>> {
-    let mut m = serde_json::Map::new();
-    m.insert(
-        "type".to_string(),
-        serde_json::Value::String("object".to_string()),
-    );
-    m.insert("properties".to_string(), properties);
-    if !required.is_empty() {
-        m.insert(
-            "required".to_string(),
-            serde_json::Value::Array(
-                required
-                    .into_iter()
-                    .map(|s| serde_json::Value::String(s.to_string()))
-                    .collect(),
-            ),
-        );
-    }
-    Arc::new(m)
-}
-
-fn empty_schema() -> Arc<serde_json::Map<String, serde_json::Value>> {
-    let mut m = serde_json::Map::new();
-    m.insert(
-        "type".to_string(),
-        serde_json::Value::String("object".to_string()),
-    );
-    Arc::new(m)
-}
 
 fn build_tools() -> Vec<Tool> {
     vec![
@@ -346,38 +309,6 @@ impl EnrichmentMcpServer {
         }
     }
 
-    fn json_result<T: Serialize>(data: &T) -> CallToolResult {
-        match serde_json::to_string_pretty(data) {
-            Ok(json) => CallToolResult::success(vec![Content::text(json)]),
-            Err(e) => CallToolResult::error(vec![Content::text(format!(
-                "Serialization error: {e}"
-            ))]),
-        }
-    }
-
-    fn error_result(msg: &str) -> CallToolResult {
-        CallToolResult::error(vec![Content::text(msg.to_string())])
-    }
-
-    fn get_str(args: &serde_json::Value, key: &str) -> Option<String> {
-        args.get(key).and_then(|v| v.as_str()).map(String::from)
-    }
-
-    fn get_i64(args: &serde_json::Value, key: &str) -> Option<i64> {
-        args.get(key).and_then(|v| v.as_i64())
-    }
-
-    fn get_str_array(args: &serde_json::Value, key: &str) -> Vec<String> {
-        args.get(key)
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     /// Basic domain validation: must be non-empty, no whitespace, no path separators.
     fn is_valid_domain(domain: &str) -> bool {
         !domain.is_empty()
@@ -396,10 +327,10 @@ impl EnrichmentMcpServer {
         domain: &str,
     ) -> CallToolResult {
         if first_name.is_empty() || last_name.is_empty() {
-            return Self::error_result("first_name and last_name must not be empty");
+            return error_result("first_name and last_name must not be empty");
         }
         if !Self::is_valid_domain(domain) {
-            return Self::error_result("Invalid domain format");
+            return error_result("Invalid domain format");
         }
 
         let person = self
@@ -412,7 +343,7 @@ impl EnrichmentMcpServer {
             .await;
         let mx_records = DnsProvider::mx_lookup(domain).await;
 
-        Self::json_result(&serde_json::json!({
+        json_result(&serde_json::json!({
             "person": person,
             "email_candidates": candidates,
             "mx_records": mx_records,
@@ -422,31 +353,31 @@ impl EnrichmentMcpServer {
 
     async fn handle_enrich_company(&self, domain: &str) -> CallToolResult {
         if !Self::is_valid_domain(domain) {
-            return Self::error_result("Invalid domain format");
+            return error_result("Invalid domain format");
         }
         let company = self.waterfall.enrich_company(domain).await;
-        Self::json_result(&company)
+        json_result(&company)
     }
 
     async fn handle_verify_email(&self, email: &str) -> CallToolResult {
         // Reject emails with control characters (CRLF injection, null bytes, etc.)
         if email.contains(|c: char| c.is_control()) {
-            return Self::error_result("Invalid email: contains control characters");
+            return error_result("Invalid email: contains control characters");
         }
         let parts: Vec<&str> = email.split('@').collect();
         if parts.len() != 2 {
-            return Self::error_result("Invalid email format");
+            return error_result("Invalid email format");
         }
         if parts[0].is_empty() || parts[1].is_empty() || !parts[1].contains('.') {
-            return Self::error_result("Invalid email format");
+            return error_result("Invalid email format");
         }
         let result = self.waterfall.verify_email(email).await;
-        Self::json_result(&result)
+        json_result(&result)
     }
 
     async fn handle_domain_emails(&self, domain: &str) -> CallToolResult {
         if !Self::is_valid_domain(domain) {
-            return Self::error_result("Invalid domain format");
+            return error_result("Invalid domain format");
         }
         let prefixes = ["info", "hello", "contact", "support", "sales", "admin"];
         let mx_records = DnsProvider::mx_lookup(domain).await;
@@ -477,7 +408,7 @@ impl EnrichmentMcpServer {
             }));
         }
 
-        Self::json_result(&serde_json::json!({
+        json_result(&serde_json::json!({
             "domain": domain,
             "mx_records": mx_records,
             "emails": results,
@@ -502,7 +433,7 @@ impl EnrichmentMcpServer {
         .await
         {
             Ok(r) => r,
-            Err(e) => return Self::error_result(&format!("Database error: {e}")),
+            Err(e) => return error_result(&format!("Database error: {e}")),
         };
 
         let results: Vec<serde_json::Value> = rows
@@ -510,7 +441,7 @@ impl EnrichmentMcpServer {
             .map(|(q, r)| serde_json::json!({ "query": q, "result": r }))
             .collect();
 
-        Self::json_result(&serde_json::json!({
+        json_result(&serde_json::json!({
             "count": results.len(),
             "results": results,
         }))
@@ -518,11 +449,11 @@ impl EnrichmentMcpServer {
 
     async fn handle_reverse_domain(&self, domain: &str) -> CallToolResult {
         if !Self::is_valid_domain(domain) {
-            return Self::error_result("Invalid domain format");
+            return error_result("Invalid domain format");
         }
         match self.waterfall.domain_info(domain).await {
-            Some(info) => Self::json_result(&info),
-            None => Self::error_result("Domain info lookup failed"),
+            Some(info) => json_result(&info),
+            None => error_result("Domain info lookup failed"),
         }
     }
 
@@ -542,7 +473,7 @@ impl EnrichmentMcpServer {
                 "data": company,
             }));
         }
-        Self::json_result(&serde_json::json!({
+        json_result(&serde_json::json!({
             "count": results.len(),
             "results": results,
         }))
@@ -550,17 +481,17 @@ impl EnrichmentMcpServer {
 
     async fn handle_tech_stack(&self, domain: &str) -> CallToolResult {
         if !Self::is_valid_domain(domain) {
-            return Self::error_result("Invalid domain format");
+            return error_result("Invalid domain format");
         }
         match self.http_provider.enrich_company(domain).await {
-            Some(company) => Self::json_result(&serde_json::json!({
+            Some(company) => json_result(&serde_json::json!({
                 "domain": domain,
                 "server": company.server,
                 "x_powered_by": company.x_powered_by,
                 "x_generator": company.x_generator,
                 "technologies": company.tech_stack,
             })),
-            None => Self::json_result(&serde_json::json!({
+            None => json_result(&serde_json::json!({
                 "domain": domain,
                 "technologies": [],
             })),
@@ -569,10 +500,10 @@ impl EnrichmentMcpServer {
 
     async fn handle_hiring_signals(&self, domain: &str) -> CallToolResult {
         if !Self::is_valid_domain(domain) {
-            return Self::error_result("Invalid domain format");
+            return error_result("Invalid domain format");
         }
         let result = self.http_provider.check_hiring(domain).await;
-        Self::json_result(&result)
+        json_result(&result)
     }
 
     async fn handle_social_profiles(
@@ -581,7 +512,7 @@ impl EnrichmentMcpServer {
         domain: &str,
     ) -> CallToolResult {
         let profiles = SocialProvider::generate_profiles(company_name, domain);
-        Self::json_result(&serde_json::json!({
+        json_result(&serde_json::json!({
             "company_name": company_name,
             "domain": domain,
             "linkedin": profiles.get("linkedin"),
@@ -599,7 +530,7 @@ impl EnrichmentMcpServer {
         .await
         {
             Ok(r) => r,
-            Err(e) => return Self::error_result(&format!("Database error: {e}")),
+            Err(e) => return error_result(&format!("Database error: {e}")),
         };
 
         let total_expired: (i64,) = sqlx::query_as(
@@ -615,7 +546,7 @@ impl EnrichmentMcpServer {
             .collect();
         let total: i64 = rows.iter().map(|(_, c)| c).sum();
 
-        Self::json_result(&serde_json::json!({
+        json_result(&serde_json::json!({
             "total": total,
             "expired": total_expired.0,
             "by_type": stats,
@@ -628,13 +559,13 @@ impl EnrichmentMcpServer {
         query_json: &serde_json::Value,
     ) -> CallToolResult {
         match self.waterfall.cache().get(lookup_type, query_json).await {
-            Some(result) => Self::json_result(&serde_json::json!({
+            Some(result) => json_result(&serde_json::json!({
                 "found": true,
                 "lookup_type": lookup_type,
                 "query": query_json,
                 "result": result,
             })),
-            None => Self::json_result(&serde_json::json!({
+            None => json_result(&serde_json::json!({
                 "found": false,
                 "lookup_type": lookup_type,
                 "query": query_json,
@@ -688,68 +619,68 @@ impl ServerHandler for EnrichmentMcpServer {
             let result = match name_str {
                 "enrich_person" => {
                     match (
-                        Self::get_str(&args, "first_name"),
-                        Self::get_str(&args, "last_name"),
-                        Self::get_str(&args, "company_domain"),
+                        get_str(&args, "first_name"),
+                        get_str(&args, "last_name"),
+                        get_str(&args, "company_domain"),
                     ) {
                         (Some(f), Some(l), Some(d)) => {
                             self.handle_enrich_person(&f, &l, &d).await
                         }
-                        _ => Self::error_result(
+                        _ => error_result(
                             "Missing required parameters: first_name, last_name, company_domain",
                         ),
                     }
                 }
-                "enrich_company" => match Self::get_str(&args, "domain") {
+                "enrich_company" => match get_str(&args, "domain") {
                     Some(d) => self.handle_enrich_company(&d).await,
-                    None => Self::error_result("Missing required parameter: domain"),
+                    None => error_result("Missing required parameter: domain"),
                 },
-                "verify_email" => match Self::get_str(&args, "email") {
+                "verify_email" => match get_str(&args, "email") {
                     Some(e) => self.handle_verify_email(&e).await,
-                    None => Self::error_result("Missing required parameter: email"),
+                    None => error_result("Missing required parameter: email"),
                 },
-                "domain_emails" => match Self::get_str(&args, "domain") {
+                "domain_emails" => match get_str(&args, "domain") {
                     Some(d) => self.handle_domain_emails(&d).await,
-                    None => Self::error_result("Missing required parameter: domain"),
+                    None => error_result("Missing required parameter: domain"),
                 },
-                "search_people" => match Self::get_str(&args, "query") {
+                "search_people" => match get_str(&args, "query") {
                     Some(q) => {
-                        let limit = Self::get_i64(&args, "limit")
+                        let limit = get_i64(&args, "limit")
                             .unwrap_or(20)
                             .clamp(0, 1000);
                         self.handle_search_people(&q, limit).await
                     }
-                    None => Self::error_result("Missing required parameter: query"),
+                    None => error_result("Missing required parameter: query"),
                 },
-                "reverse_domain" => match Self::get_str(&args, "domain") {
+                "reverse_domain" => match get_str(&args, "domain") {
                     Some(d) => self.handle_reverse_domain(&d).await,
-                    None => Self::error_result("Missing required parameter: domain"),
+                    None => error_result("Missing required parameter: domain"),
                 },
                 "bulk_enrich" => {
-                    let domains = Self::get_str_array(&args, "domains");
+                    let domains = get_str_array(&args, "domains");
                     if domains.is_empty() {
-                        Self::error_result(
+                        error_result(
                             "Missing required parameter: domains (must be a non-empty array)",
                         )
                     } else {
                         self.handle_bulk_enrich(&domains).await
                     }
                 }
-                "tech_stack" => match Self::get_str(&args, "domain") {
+                "tech_stack" => match get_str(&args, "domain") {
                     Some(d) => self.handle_tech_stack(&d).await,
-                    None => Self::error_result("Missing required parameter: domain"),
+                    None => error_result("Missing required parameter: domain"),
                 },
-                "hiring_signals" => match Self::get_str(&args, "domain") {
+                "hiring_signals" => match get_str(&args, "domain") {
                     Some(d) => self.handle_hiring_signals(&d).await,
-                    None => Self::error_result("Missing required parameter: domain"),
+                    None => error_result("Missing required parameter: domain"),
                 },
                 "social_profiles" => {
                     match (
-                        Self::get_str(&args, "company_name"),
-                        Self::get_str(&args, "domain"),
+                        get_str(&args, "company_name"),
+                        get_str(&args, "domain"),
                     ) {
                         (Some(n), Some(d)) => self.handle_social_profiles(&n, &d).await,
-                        _ => Self::error_result(
+                        _ => error_result(
                             "Missing required parameters: company_name, domain",
                         ),
                     }
@@ -757,16 +688,16 @@ impl ServerHandler for EnrichmentMcpServer {
                 "enrichment_stats" => self.handle_enrichment_stats().await,
                 "cache_lookup" => {
                     match (
-                        Self::get_str(&args, "lookup_type"),
+                        get_str(&args, "lookup_type"),
                         args.get("query_json"),
                     ) {
                         (Some(t), Some(q)) => self.handle_cache_lookup(&t, q).await,
-                        _ => Self::error_result(
+                        _ => error_result(
                             "Missing required parameters: lookup_type, query_json",
                         ),
                     }
                 }
-                _ => Self::error_result(&format!("Unknown tool: {}", request.name)),
+                _ => error_result(&format!("Unknown tool: {}", request.name)),
             };
 
             Ok(result)
