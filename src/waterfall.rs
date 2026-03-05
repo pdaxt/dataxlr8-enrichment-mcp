@@ -97,9 +97,11 @@ impl Waterfall {
                     (name, result)
                 });
             }
-            while let Some(Ok((name, Some(result)))) = set.join_next().await {
-                info!(provider = %name, "Person enrichment result");
-                all_results.push(result);
+            while let Some(join_result) = set.join_next().await {
+                if let Ok((name, Some(result))) = join_result {
+                    info!(provider = %name, "Person enrichment result");
+                    all_results.push(result);
+                }
             }
 
             // Check if we've reached sufficient confidence
@@ -146,9 +148,11 @@ impl Waterfall {
                     (name, result)
                 });
             }
-            while let Some(Ok((name, Some(result)))) = set.join_next().await {
-                info!(provider = %name, "Company enrichment result");
-                all_results.push(result);
+            while let Some(join_result) = set.join_next().await {
+                if let Ok((name, Some(result))) = join_result {
+                    info!(provider = %name, "Company enrichment result");
+                    all_results.push(result);
+                }
             }
 
             let max_conf = all_results.iter().map(|r| r.confidence).fold(0.0f64, f64::max);
@@ -194,9 +198,11 @@ impl Waterfall {
                     (name, result)
                 });
             }
-            while let Some(Ok((name, Some(result)))) = set.join_next().await {
-                info!(provider = %name, "Email verification result");
-                all_results.push(result);
+            while let Some(join_result) = set.join_next().await {
+                if let Ok((name, Some(result))) = join_result {
+                    info!(provider = %name, "Email verification result");
+                    all_results.push(result);
+                }
             }
 
             if !all_results.is_empty() {

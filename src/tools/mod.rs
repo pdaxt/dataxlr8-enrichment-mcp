@@ -378,6 +378,15 @@ impl EnrichmentMcpServer {
             .unwrap_or_default()
     }
 
+    /// Basic domain validation: must be non-empty, no whitespace, no path separators.
+    fn is_valid_domain(domain: &str) -> bool {
+        !domain.is_empty()
+            && !domain.contains(|c: char| c.is_whitespace())
+            && !domain.contains('/')
+            && !domain.contains('\\')
+            && domain.contains('.')
+    }
+
     // ---- Tool handlers (thin wrappers) ----
 
     async fn handle_enrich_person(
@@ -388,6 +397,9 @@ impl EnrichmentMcpServer {
     ) -> CallToolResult {
         if first_name.is_empty() || last_name.is_empty() {
             return Self::error_result("first_name and last_name must not be empty");
+        }
+        if !Self::is_valid_domain(domain) {
+            return Self::error_result("Invalid domain format");
         }
 
         let person = self
@@ -409,13 +421,23 @@ impl EnrichmentMcpServer {
     }
 
     async fn handle_enrich_company(&self, domain: &str) -> CallToolResult {
+        if !Self::is_valid_domain(domain) {
+            return Self::error_result("Invalid domain format");
+        }
         let company = self.waterfall.enrich_company(domain).await;
         Self::json_result(&company)
     }
 
     async fn handle_verify_email(&self, email: &str) -> CallToolResult {
+        // Reject emails with control characters (CRLF injection, null bytes, etc.)
+        if email.contains(|c: char| c.is_control()) {
+            return Self::error_result("Invalid email: contains control characters");
+        }
         let parts: Vec<&str> = email.split('@').collect();
         if parts.len() != 2 {
+            return Self::error_result("Invalid email format");
+        }
+        if parts[0].is_empty() || parts[1].is_empty() || !parts[1].contains('.') {
             return Self::error_result("Invalid email format");
         }
         let result = self.waterfall.verify_email(email).await;
@@ -423,6 +445,9 @@ impl EnrichmentMcpServer {
     }
 
     async fn handle_domain_emails(&self, domain: &str) -> CallToolResult {
+        if !Self::is_valid_domain(domain) {
+            return Self::error_result("Invalid domain format");
+        }
         let prefixes = ["info", "hello", "contact", "support", "sales", "admin"];
         let mx_records = DnsProvider::mx_lookup(domain).await;
         let mx_host = mx_records.first().cloned();
@@ -492,6 +517,9 @@ impl EnrichmentMcpServer {
     }
 
     async fn handle_reverse_domain(&self, domain: &str) -> CallToolResult {
+        if !Self::is_valid_domain(domain) {
+            return Self::error_result("Invalid domain format");
+        }
         match self.waterfall.domain_info(domain).await {
             Some(info) => Self::json_result(&info),
             None => Self::error_result("Domain info lookup failed"),
@@ -501,6 +529,13 @@ impl EnrichmentMcpServer {
     async fn handle_bulk_enrich(&self, domains: &[String]) -> CallToolResult {
         let mut results = Vec::new();
         for domain in domains {
+            if !Self::is_valid_domain(domain) {
+                results.push(serde_json::json!({
+                    "domain": domain,
+                    "error": "Invalid domain format",
+                }));
+                continue;
+            }
             let company = self.waterfall.enrich_company(domain).await;
             results.push(serde_json::json!({
                 "domain": domain,
@@ -514,6 +549,9 @@ impl EnrichmentMcpServer {
     }
 
     async fn handle_tech_stack(&self, domain: &str) -> CallToolResult {
+        if !Self::is_valid_domain(domain) {
+            return Self::error_result("Invalid domain format");
+        }
         match self.http_provider.enrich_company(domain).await {
             Some(company) => Self::json_result(&serde_json::json!({
                 "domain": domain,
@@ -530,6 +568,9 @@ impl EnrichmentMcpServer {
     }
 
     async fn handle_hiring_signals(&self, domain: &str) -> CallToolResult {
+        if !Self::is_valid_domain(domain) {
+            return Self::error_result("Invalid domain format");
+        }
         let result = self.http_provider.check_hiring(domain).await;
         Self::json_result(&result)
     }
@@ -673,7 +714,9 @@ impl ServerHandler for EnrichmentMcpServer {
                 },
                 "search_people" => match Self::get_str(&args, "query") {
                     Some(q) => {
-                        let limit = Self::get_i64(&args, "limit").unwrap_or(20);
+                        let limit = Self::get_i64(&args, "limit")
+                            .unwrap_or(20)
+                            .clamp(0, 1000);
                         self.handle_search_people(&q, limit).await
                     }
                     None => Self::error_result("Missing required parameter: query"),
