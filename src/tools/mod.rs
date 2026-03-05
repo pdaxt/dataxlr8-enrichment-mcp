@@ -499,10 +499,13 @@ impl EnrichmentMcpServer {
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
+        let read_timeout = std::time::Duration::from_secs(5);
 
         // Read banner
-        if let Err(e) = reader.read_line(&mut line).await {
-            return (false, format!("read banner failed: {e}"));
+        match tokio::time::timeout(read_timeout, reader.read_line(&mut line)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return (false, format!("read banner failed: {e}")),
+            Err(_) => return (false, "read banner timeout".to_string()),
         }
         if !line.starts_with("220") {
             return (false, format!("bad banner: {}", line.trim()));
@@ -520,8 +523,10 @@ impl EnrichmentMcpServer {
         // Read multi-line EHLO response
         loop {
             line.clear();
-            if reader.read_line(&mut line).await.is_err() {
-                return (false, "EHLO read failed".to_string());
+            match tokio::time::timeout(read_timeout, reader.read_line(&mut line)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) => return (false, "EHLO read failed".to_string()),
+                Err(_) => return (false, "EHLO read timeout".to_string()),
             }
             if line.len() < 4 {
                 break;
@@ -541,8 +546,10 @@ impl EnrichmentMcpServer {
         {
             return (false, "MAIL FROM write failed".to_string());
         }
-        if reader.read_line(&mut line).await.is_err() {
-            return (false, "MAIL FROM read failed".to_string());
+        match tokio::time::timeout(read_timeout, reader.read_line(&mut line)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => return (false, "MAIL FROM read failed".to_string()),
+            Err(_) => return (false, "MAIL FROM read timeout".to_string()),
         }
         if !line.starts_with("250") {
             return (false, format!("MAIL FROM rejected: {}", line.trim()));
@@ -554,8 +561,10 @@ impl EnrichmentMcpServer {
         if writer.write_all(rcpt.as_bytes()).await.is_err() {
             return (false, "RCPT TO write failed".to_string());
         }
-        if reader.read_line(&mut line).await.is_err() {
-            return (false, "RCPT TO read failed".to_string());
+        match tokio::time::timeout(read_timeout, reader.read_line(&mut line)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => return (false, "RCPT TO read failed".to_string()),
+            Err(_) => return (false, "RCPT TO read timeout".to_string()),
         }
 
         let accepted = line.starts_with("250");
@@ -591,7 +600,12 @@ impl EnrichmentMcpServer {
 
         let f = first_name.to_lowercase();
         let l = last_name.to_lowercase();
-        let fi = &f[..1]; // first initial
+
+        if f.is_empty() || l.is_empty() {
+            return Self::error_result("first_name and last_name must not be empty");
+        }
+
+        let fi: String = f.chars().next().unwrap().to_string();
 
         let candidates = vec![
             format!("{f}.{l}@{domain}"),
@@ -663,17 +677,19 @@ impl EnrichmentMcpServer {
                             }
                         }
                     }
-                    // Extract meta description
-                    let lower = body.to_lowercase();
+                    // Extract meta description (case-insensitive; ascii_lowercase preserves byte positions)
+                    let lower = body.to_ascii_lowercase();
                     if let Some(pos) = lower.find("name=\"description\"") {
-                        // Look for content="..." nearby
-                        let region_start = if pos > 200 { pos - 200 } else { 0 };
-                        let region = &body[region_start..std::cmp::min(pos + 300, body.len())];
-                        if let Some(c) = region.to_lowercase().find("content=\"") {
-                            let content_start = c + 9;
-                            if let Some(end) = region[content_start..].find('"') {
-                                description =
-                                    region[content_start..content_start + end].to_string();
+                        let region_start = pos.saturating_sub(200);
+                        let region_end = std::cmp::min(pos + 300, lower.len());
+                        let region = &lower[region_start..region_end];
+                        if let Some(c) = region.find("content=\"") {
+                            let abs_start = region_start + c + 9;
+                            if abs_start < body.len() {
+                                if let Some(end) = body[abs_start..].find('"') {
+                                    description =
+                                        body[abs_start..abs_start + end].to_string();
+                                }
                             }
                         }
                     }
