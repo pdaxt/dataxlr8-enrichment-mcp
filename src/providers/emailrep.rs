@@ -1,3 +1,8 @@
+//! EmailRep enrichment provider — email reputation scoring.
+//!
+//! Free API (no key needed, lower rate limits). Optional `EMAILREP_API_KEY` for higher limits.
+//! Always classified as Free tier since the API itself is free.
+
 use super::{EmailVerification, EnrichmentProvider, ProviderTier};
 use tracing::warn;
 
@@ -17,15 +22,19 @@ impl EnrichmentProvider for EmailRepProvider {
     fn name(&self) -> &str {
         "emailrep"
     }
+
+    /// Always Free — the API is free regardless of whether a key is provided.
+    /// A key only increases rate limits, it doesn't change the pricing tier.
     fn tier(&self) -> ProviderTier {
-        if self.api_key.is_empty() {
-            ProviderTier::Free
-        } else {
-            ProviderTier::Freemium
-        }
+        ProviderTier::Free
     }
 
     async fn verify_email(&self, email: &str) -> Option<EmailVerification> {
+        // Basic email format check before making the API call.
+        if !email.contains('@') || email.contains(|c: char| c.is_whitespace()) {
+            return None;
+        }
+
         let url = format!("https://emailrep.io/{email}");
         let mut req = self
             .client
@@ -60,7 +69,6 @@ impl EnrichmentProvider for EmailRepProvider {
         let disposable = details["disposable"].as_bool().unwrap_or(false);
         let free_provider = details["free_provider"].as_bool().unwrap_or(false);
 
-        // Confidence based on reputation
         let confidence = match reputation {
             "high" => 0.9,
             "medium" => 0.6,
@@ -73,7 +81,7 @@ impl EnrichmentProvider for EmailRepProvider {
             deliverable: deliverable && !suspicious,
             catch_all: false,
             disposable,
-            mx_found: true, // emailrep doesn't report this directly
+            mx_found: true,
             smtp_verified: false,
             smtp_detail: format!(
                 "reputation={reputation}, suspicious={suspicious}, references={references}, free={free_provider}"

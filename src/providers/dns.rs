@@ -1,5 +1,40 @@
+//! DNS enrichment provider — MX, A/AAAA, NS lookups via hickory-resolver.
+//!
+//! The resolver is created once (via `OnceCell`) and reused for all lookups,
+//! which lets hickory's internal response cache work across calls.
+
 use super::{CompanyData, DomainData, EmailVerification, EnrichmentProvider, ProviderTier};
 use tracing::warn;
+
+/// Global resolver — created on first use, then reused for the process lifetime.
+/// This is critical: creating a new resolver per call defeats the internal DNS cache
+/// and opens a new UDP socket each time.
+static RESOLVER: tokio::sync::OnceCell<hickory_resolver::TokioResolver> =
+    tokio::sync::OnceCell::const_new();
+
+async fn get_resolver() -> Option<&'static hickory_resolver::TokioResolver> {
+    match RESOLVER
+        .get_or_try_init(|| async {
+            hickory_resolver::Resolver::builder_tokio().map(|b| b.build())
+        })
+        .await
+    {
+        Ok(r) => Some(r),
+        Err(e) => {
+            warn!(error = %e, "DNS resolver init failed");
+            None
+        }
+    }
+}
+
+/// Strip the trailing dot from FQDN strings (e.g. "smtp.google.com." → "smtp.google.com").
+/// Trailing dots are valid in DNS but break SMTP `TcpStream::connect("host.:25")` on some platforms.
+fn strip_trailing_dot(mut s: String) -> String {
+    if s.ends_with('.') {
+        s.pop();
+    }
+    s
+}
 
 pub struct DnsProvider;
 
@@ -8,25 +43,17 @@ impl DnsProvider {
         Self
     }
 
-    fn make_resolver() -> Option<hickory_resolver::TokioResolver> {
-        match hickory_resolver::Resolver::builder_tokio() {
-            Ok(builder) => Some(builder.build()),
-            Err(e) => {
-                warn!(error = %e, "Failed to create DNS resolver");
-                None
-            }
-        }
-    }
-
     pub async fn mx_lookup(domain: &str) -> Vec<String> {
-        let resolver = match Self::make_resolver() {
+        let resolver = match get_resolver().await {
             Some(r) => r,
             None => return Vec::new(),
         };
         match resolver.mx_lookup(domain).await {
             Ok(records) => {
-                let mut hosts: Vec<String> =
-                    records.iter().map(|mx| mx.exchange().to_ascii()).collect();
+                let mut hosts: Vec<String> = records
+                    .iter()
+                    .map(|mx| strip_trailing_dot(mx.exchange().to_ascii()))
+                    .collect();
                 hosts.sort();
                 hosts.dedup();
                 hosts
@@ -39,7 +66,7 @@ impl DnsProvider {
     }
 
     pub async fn a_lookup(domain: &str) -> Vec<String> {
-        let resolver = match Self::make_resolver() {
+        let resolver = match get_resolver().await {
             Some(r) => r,
             None => return Vec::new(),
         };
@@ -56,12 +83,15 @@ impl DnsProvider {
     }
 
     pub async fn ns_lookup(domain: &str) -> Vec<String> {
-        let resolver = match Self::make_resolver() {
+        let resolver = match get_resolver().await {
             Some(r) => r,
             None => return Vec::new(),
         };
         match resolver.ns_lookup(domain).await {
-            Ok(records) => records.iter().map(|ns| ns.0.to_ascii()).collect(),
+            Ok(records) => records
+                .iter()
+                .map(|ns| strip_trailing_dot(ns.0.to_ascii()))
+                .collect(),
             Err(e) => {
                 warn!(domain, error = %e, "NS lookup failed");
                 Vec::new()

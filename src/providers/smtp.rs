@@ -1,3 +1,6 @@
+//! SMTP enrichment provider — email verification via EHLO/RCPT TO handshake,
+//! disposable domain detection, and email pattern generation.
+
 use super::dns::DnsProvider;
 use super::{EmailCandidate, EmailVerification, EnrichmentProvider, ProviderTier};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -26,6 +29,12 @@ const DISPOSABLE_DOMAINS: &[&str] = &[
     "getnada.com",
 ];
 
+/// Max EHLO continuation lines before we bail (prevents infinite-loop from rogue servers).
+const MAX_EHLO_LINES: usize = 50;
+
+/// Max bytes per SMTP response line (prevents memory exhaustion from rogue servers).
+const MAX_LINE_LEN: usize = 1024;
+
 pub struct SmtpProvider;
 
 impl SmtpProvider {
@@ -37,8 +46,37 @@ impl SmtpProvider {
         DISPOSABLE_DOMAINS.contains(&domain.to_lowercase().as_str())
     }
 
+    /// Read a single SMTP response line with timeout and length guard.
+    async fn read_line_safe(
+        reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+        buf: &mut String,
+        timeout: std::time::Duration,
+    ) -> Result<(), String> {
+        buf.clear();
+        match tokio::time::timeout(timeout, reader.read_line(buf)).await {
+            Ok(Ok(0)) => Err("connection closed".to_string()),
+            Ok(Ok(_)) => {
+                if buf.len() > MAX_LINE_LEN {
+                    Err("response line too long".to_string())
+                } else {
+                    Ok(())
+                }
+            }
+            Ok(Err(e)) => Err(format!("read error: {e}")),
+            Err(_) => Err("read timeout".to_string()),
+        }
+    }
+
     /// Perform SMTP handshake against an MX host to verify deliverability.
+    ///
+    /// Protocol flow: banner → EHLO → MAIL FROM:<> → RCPT TO:<email> → QUIT.
+    /// Returns (accepted, detail_string).
     pub async fn smtp_verify(email: &str, mx_host: &str) -> (bool, String) {
+        // Guard: reject emails with CRLF to prevent SMTP command injection.
+        if email.contains('\r') || email.contains('\n') {
+            return (false, "email contains CR/LF".to_string());
+        }
+
         let addr = format!("{mx_host}:25");
         let stream = match tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -54,20 +92,17 @@ impl SmtpProvider {
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
-        let read_timeout = std::time::Duration::from_secs(5);
+        let timeout = std::time::Duration::from_secs(5);
 
-        // Read banner
-        match tokio::time::timeout(read_timeout, reader.read_line(&mut line)).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => return (false, format!("read banner failed: {e}")),
-            Err(_) => return (false, "read banner timeout".to_string()),
+        // Read 220 banner
+        if let Err(e) = Self::read_line_safe(&mut reader, &mut line, timeout).await {
+            return (false, format!("banner: {e}"));
         }
         if !line.starts_with("220") {
             return (false, format!("bad banner: {}", line.trim()));
         }
 
         // EHLO
-        line.clear();
         if writer
             .write_all(b"EHLO enrichment.dataxlr8.com\r\n")
             .await
@@ -75,12 +110,11 @@ impl SmtpProvider {
         {
             return (false, "EHLO write failed".to_string());
         }
-        loop {
-            line.clear();
-            match tokio::time::timeout(read_timeout, reader.read_line(&mut line)).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(_)) => return (false, "EHLO read failed".to_string()),
-                Err(_) => return (false, "EHLO read timeout".to_string()),
+        // Read multi-line EHLO response (250- continuation, 250<space> terminal).
+        // Bounded to MAX_EHLO_LINES to prevent infinite loop from rogue servers.
+        for _ in 0..MAX_EHLO_LINES {
+            if let Err(e) = Self::read_line_safe(&mut reader, &mut line, timeout).await {
+                return (false, format!("EHLO: {e}"));
             }
             if line.len() < 4 {
                 break;
@@ -90,8 +124,7 @@ impl SmtpProvider {
             }
         }
 
-        // MAIL FROM
-        line.clear();
+        // MAIL FROM:<> (null reverse-path, standard for verification probes)
         if writer
             .write_all(b"MAIL FROM:<>\r\n")
             .await
@@ -99,37 +132,32 @@ impl SmtpProvider {
         {
             return (false, "MAIL FROM write failed".to_string());
         }
-        match tokio::time::timeout(read_timeout, reader.read_line(&mut line)).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(_)) => return (false, "MAIL FROM read failed".to_string()),
-            Err(_) => return (false, "MAIL FROM read timeout".to_string()),
+        if let Err(e) = Self::read_line_safe(&mut reader, &mut line, timeout).await {
+            return (false, format!("MAIL FROM: {e}"));
         }
         if !line.starts_with("250") {
             return (false, format!("MAIL FROM rejected: {}", line.trim()));
         }
 
-        // RCPT TO
-        line.clear();
+        // RCPT TO — the actual verification step
         let rcpt = format!("RCPT TO:<{email}>\r\n");
         if writer.write_all(rcpt.as_bytes()).await.is_err() {
             return (false, "RCPT TO write failed".to_string());
         }
-        match tokio::time::timeout(read_timeout, reader.read_line(&mut line)).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(_)) => return (false, "RCPT TO read failed".to_string()),
-            Err(_) => return (false, "RCPT TO read timeout".to_string()),
+        if let Err(e) = Self::read_line_safe(&mut reader, &mut line, timeout).await {
+            return (false, format!("RCPT TO: {e}"));
         }
 
         let accepted = line.starts_with("250");
         let detail = line.trim().to_string();
 
-        // QUIT (best effort)
+        // QUIT (best effort, don't care about response)
         let _ = writer.write_all(b"QUIT\r\n").await;
 
         (accepted, detail)
     }
 
-    /// Full email verification with MX records provided externally.
+    /// Full email verification using externally-provided MX records.
     pub async fn verify_with_mx(email: &str, mx_records: &[String]) -> EmailVerification {
         let parts: Vec<&str> = email.split('@').collect();
         let domain = if parts.len() == 2 { parts[1] } else { "" };
@@ -193,6 +221,7 @@ impl EnrichmentProvider for SmtpProvider {
         }
         let fi: String = f.chars().next().unwrap().to_string();
 
+        // Patterns ordered by commonality (first.last is most common across companies).
         let patterns = vec![
             (format!("{f}.{l}@{domain}"), "first.last"),
             (format!("{fi}.{l}@{domain}"), "fi.last"),

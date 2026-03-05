@@ -151,9 +151,15 @@ pub fn merge_company(mut results: Vec<CompanyData>) -> CompanyData {
 }
 
 /// Merge email verifications — SMTP/Hunter results beat DNS-only.
+///
+/// Returns the highest-confidence result, with boolean fields (disposable, mx_found)
+/// OR'd across all providers so that a detection from any source is preserved.
 pub fn merge_email_verification(mut results: Vec<EmailVerification>) -> EmailVerification {
-    if results.len() <= 1 {
-        return results.pop().unwrap();
+    if results.is_empty() {
+        return EmailVerification::default();
+    }
+    if results.len() == 1 {
+        return results.remove(0);
     }
 
     results.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));

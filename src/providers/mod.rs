@@ -55,7 +55,7 @@ pub struct CompanyData {
     pub source: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EmailVerification {
     pub email: String,
     pub deliverable: bool,

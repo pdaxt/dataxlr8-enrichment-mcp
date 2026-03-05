@@ -460,7 +460,12 @@ impl EnrichmentMcpServer {
     }
 
     async fn handle_search_people(&self, query_str: &str, limit: i64) -> CallToolResult {
-        let pattern = format!("%{query_str}%");
+        // Escape LIKE/ILIKE metacharacters to prevent wildcard injection.
+        let escaped = query_str
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
         let rows: Vec<(serde_json::Value, serde_json::Value)> = match sqlx::query_as(
             "SELECT query, result FROM enrichment.lookups \
              WHERE lookup_type = 'person' AND result::text ILIKE $1 \

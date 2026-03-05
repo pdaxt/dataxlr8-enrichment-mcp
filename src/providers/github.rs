@@ -1,3 +1,7 @@
+//! GitHub enrichment provider — person lookup via GitHub user search API.
+//!
+//! Requires `GITHUB_TOKEN` env var. Free tier: 5,000 requests/hour.
+
 use super::{EnrichmentProvider, PersonData, ProviderTier};
 use tracing::warn;
 
@@ -27,11 +31,13 @@ impl EnrichmentProvider for GithubProvider {
         last_name: &str,
         _domain: &str,
     ) -> Option<PersonData> {
-        let query = format!("{first_name} {last_name}");
+        // Use space separator — reqwest URL-encodes it to `+` which GitHub expects.
+        // Using literal `+` would get double-encoded to `%2B`.
+        let query = format!("{first_name} {last_name} in:fullname");
         let resp = self
             .client
             .get("https://api.github.com/search/users")
-            .query(&[("q", format!("{query}+in:fullname"))])
+            .query(&[("q", &query)])
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github+json")
             .header("User-Agent", "DataXLR8-Enrichment/0.2")
@@ -51,7 +57,7 @@ impl EnrichmentProvider for GithubProvider {
         let login = first_match["login"].as_str().unwrap_or_default();
         let html_url = first_match["html_url"].as_str().unwrap_or_default();
 
-        // Fetch full user profile
+        // Fetch full user profile for richer data
         let profile_resp = self
             .client
             .get(format!("https://api.github.com/users/{login}"))

@@ -1,3 +1,6 @@
+//! HTTP enrichment provider — scrapes company websites for title, description,
+//! technology stack detection, and hiring signal pages.
+
 use super::{CompanyData, EnrichmentProvider, ProviderTier};
 use tracing::warn;
 
@@ -10,11 +13,14 @@ impl HttpProvider {
         Self { client }
     }
 
+    /// Extract `<title>` content (case-insensitive tag matching).
     pub fn extract_title(body: &str) -> String {
-        if let Some(start) = body.find("<title") {
-            if let Some(gt) = body[start..].find('>') {
+        let lower = body.to_ascii_lowercase();
+        if let Some(start) = lower.find("<title") {
+            if let Some(gt) = lower[start..].find('>') {
                 let after = start + gt + 1;
-                if let Some(end) = body[after..].find("</title>") {
+                if let Some(end) = lower[after..].find("</title>") {
+                    // Use original body for the content (preserves casing).
                     return body[after..after + end].trim().to_string();
                 }
             }
@@ -22,6 +28,8 @@ impl HttpProvider {
         String::new()
     }
 
+    /// Extract `<meta name="description" content="...">` value.
+    /// Uses ascii_lowercase to ensure byte-position parity with original body.
     pub fn extract_description(body: &str) -> String {
         let lower = body.to_ascii_lowercase();
         if let Some(pos) = lower.find("name=\"description\"") {
@@ -40,45 +48,78 @@ impl HttpProvider {
         String::new()
     }
 
+    /// Detect technologies from HTML content using specific, low-false-positive patterns.
+    ///
+    /// Each check uses patterns that are unique to the technology (class names, script paths,
+    /// data attributes) rather than generic words that could appear in normal text.
     pub fn detect_technologies(body: &str) -> Vec<String> {
         let lower = body.to_lowercase();
         let mut techs = Vec::new();
-        if lower.contains("wp-content") || lower.contains("wp-includes") {
+
+        // WordPress: theme/plugin directory paths
+        if lower.contains("wp-content/") || lower.contains("wp-includes/") {
             techs.push("WordPress".to_string());
         }
-        if lower.contains("shopify") {
+        // Shopify: CDN or JS paths
+        if lower.contains("cdn.shopify.com") || lower.contains("shopify.com/s/") {
             techs.push("Shopify".to_string());
         }
-        if lower.contains("next/static") || lower.contains("_next/") {
+        // Next.js: build output paths
+        if lower.contains("/_next/static") || lower.contains("/_next/data") {
             techs.push("Next.js".to_string());
         }
-        if lower.contains("react") {
+        // React: DOM markers or build artifacts
+        if lower.contains("data-reactroot")
+            || lower.contains("react-dom")
+            || lower.contains("__react")
+        {
             techs.push("React".to_string());
         }
-        if lower.contains("vue") {
+        // Vue.js: data attributes or runtime markers
+        if lower.contains("data-v-") || lower.contains("vue.min.js") || lower.contains("__vue__")
+        {
             techs.push("Vue.js".to_string());
         }
-        if lower.contains("angular") {
+        // Angular: framework attributes
+        if lower.contains("ng-version") || lower.contains("ng-app") || lower.contains("angular.min.js") {
             techs.push("Angular".to_string());
         }
-        if lower.contains("gatsby") {
+        // Gatsby: build markers
+        if lower.contains("___gatsby") || lower.contains("/gatsby-") {
             techs.push("Gatsby".to_string());
         }
-        if lower.contains("squarespace") {
+        // Squarespace: CDN
+        if lower.contains("squarespace.com") || lower.contains("sqsp.") {
             techs.push("Squarespace".to_string());
         }
-        if lower.contains("wix.com") {
+        // Wix: runtime
+        if lower.contains("static.wixstatic.com") || lower.contains("wix.com/") {
             techs.push("Wix".to_string());
         }
-        if lower.contains("drupal") {
+        // Drupal: settings or paths
+        if lower.contains("drupal.settings") || lower.contains("/sites/default/files") {
             techs.push("Drupal".to_string());
         }
-        if lower.contains("hubspot") {
+        // HubSpot: tracking or CMS
+        if lower.contains("js.hs-scripts.com")
+            || lower.contains("hubspot.com")
+            || lower.contains("hs-banner")
+        {
             techs.push("HubSpot".to_string());
         }
-        if lower.contains("webflow") {
+        // Webflow: runtime
+        if lower.contains("webflow.com") || lower.contains("wf-page") {
             techs.push("Webflow".to_string());
         }
+        // Laravel
+        if lower.contains("laravel") && lower.contains("csrf-token") {
+            techs.push("Laravel".to_string());
+        }
+        // Svelte
+        if lower.contains("__svelte") || lower.contains("svelte-") {
+            techs.push("Svelte".to_string());
+        }
+
         techs
     }
 
