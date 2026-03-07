@@ -13,6 +13,14 @@ use crate::providers::smtp::SmtpProvider;
 use crate::providers::EnrichmentProvider;
 use crate::waterfall::Waterfall;
 
+
+// ============================================================================
+// Validation constants
+// ============================================================================
+
+const MAX_NAME_LEN: usize = 500;
+const MAX_QUERY_LEN: usize = 1000;
+
 fn build_tools() -> Vec<Tool> {
     vec![
         Tool {
@@ -416,6 +424,13 @@ impl EnrichmentMcpServer {
     }
 
     async fn handle_search_people(&self, query_str: &str, limit: i64) -> CallToolResult {
+        let query_str = query_str.trim();
+        if query_str.is_empty() {
+            return error_result("Parameter 'query' must not be empty");
+        }
+        if query_str.len() > MAX_QUERY_LEN {
+            return error_result(&format!("'query' exceeds {} chars", MAX_QUERY_LEN));
+        }
         // Escape LIKE/ILIKE metacharacters to prevent wildcard injection.
         let escaped = query_str
             .replace('\\', "\\\\")
@@ -511,6 +526,20 @@ impl EnrichmentMcpServer {
         company_name: &str,
         domain: &str,
     ) -> CallToolResult {
+        let company_name = company_name.trim();
+        if company_name.is_empty() {
+            return error_result("Parameter 'company_name' must not be empty");
+        }
+        if company_name.len() > MAX_NAME_LEN {
+            return error_result(&format!("'company_name' exceeds {} chars", MAX_NAME_LEN));
+        }
+        let domain = domain.trim();
+        if domain.is_empty() {
+            return error_result("Parameter 'domain' must not be empty");
+        }
+        if domain.len() > MAX_NAME_LEN {
+            return error_result(&format!("'domain' exceeds {} chars", MAX_NAME_LEN));
+        }
         let profiles = SocialProvider::generate_profiles(company_name, domain);
         json_result(&serde_json::json!({
             "company_name": company_name,
@@ -558,6 +587,10 @@ impl EnrichmentMcpServer {
         lookup_type: &str,
         query_json: &serde_json::Value,
     ) -> CallToolResult {
+        let lookup_type = lookup_type.trim();
+        if lookup_type.is_empty() {
+            return error_result("Parameter 'lookup_type' must not be empty");
+        }
         match self.waterfall.cache().get(lookup_type, query_json).await {
             Some(result) => json_result(&serde_json::json!({
                 "found": true,
