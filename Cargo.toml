@@ -5,6 +5,10 @@ edition = "2024"
 description = "Email/company/person enrichment MCP server for DataXLR8 platform"
 repository = "https://github.com/pdaxt/dataxlr8-enrichment-mcp"
 
+
+[lib]
+name = "dataxlr8_enrichment_mcp"
+path = "src/lib.rs"
 [dependencies]
 # MCP SDK
 rmcp = { version = "0.17", features = ["server", "transport-io"] }
